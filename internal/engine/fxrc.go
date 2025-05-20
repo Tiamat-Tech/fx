@@ -38,7 +38,7 @@ func readFxrc() (string, error) {
 	}
 
 	// Read and combine
-	for _, path := range paths {
+	for _, path := range uniq(paths) {
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			continue // skip missing or directories
@@ -52,4 +52,16 @@ func readFxrc() (string, error) {
 	}
 
 	return builder.String(), nil
+}
+
+func uniq(paths []string) []string {
+	seen := make(map[string]bool)
+	result := []string{}
+	for _, path := range paths {
+		if !seen[path] {
+			seen[path] = true
+			result = append(result, path)
+		}
+	}
+	return result
 }
