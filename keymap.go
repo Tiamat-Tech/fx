@@ -4,6 +4,7 @@ import "github.com/charmbracelet/bubbles/key"
 
 type KeyMap struct {
 	Quit                key.Binding
+	Suspend             key.Binding
 	PageDown            key.Binding
 	PageUp              key.Binding
 	HalfPageUp          key.Binding
@@ -32,6 +33,7 @@ type KeyMap struct {
 	SearchPrev          key.Binding
 	Preview             key.Binding
 	Print               key.Binding
+	Open                key.Binding
 	GoBack              key.Binding
 	GoForward           key.Binding
 	Dig                 key.Binding
@@ -44,6 +46,10 @@ func init() {
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c", "esc"),
 			key.WithHelp("", "exit program"),
+		),
+		Suspend: key.NewBinding(
+			key.WithKeys("ctrl+z"),
+			key.WithHelp("", "suspend program"),
 		),
 		PageDown: key.NewBinding(
 			key.WithKeys("pgdown", " ", "f"),
@@ -156,6 +162,10 @@ func init() {
 		Print: key.NewBinding(
 			key.WithKeys("P"),
 			key.WithHelp("", "print"),
+		),
+		Open: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("", "open in editor"),
 		),
 		GoBack: key.NewBinding(
 			key.WithKeys("["),
