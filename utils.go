@@ -17,6 +17,16 @@ import (
 	"github.com/antonmedv/fx/internal/jsonx"
 )
 
+func lookup(names []string, defaultEditor string) string {
+	for _, name := range names {
+		env, ok := os.LookupEnv(name)
+		if ok && env != "" {
+			return env
+		}
+	}
+	return defaultEditor
+}
+
 func open(filePath string, flagYaml *bool) *os.File {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -95,7 +105,7 @@ func parseYAML(b []byte) ([]byte, error) {
 
 func isRefNode(n *jsonx.Node) (string, bool) {
 	if n.Kind == jsonx.String && len(n.Key) == 6 && string(n.Key) == `"$ref"` {
-		value, err := strconv.Unquote(string(n.Value))
+		value, err := strconv.Unquote(n.Value)
 		if err == nil {
 			_, ok := jsonpath.ParseSchemaRef(value)
 			if ok {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -109,11 +110,11 @@ func main() {
 		flag.Parse()
 		switch *shell {
 		case "bash":
-			fmt.Print(complete.Bash())
+			fmt.Print(complete.Bash)
 		case "zsh":
-			fmt.Print(complete.Zsh())
+			fmt.Print(complete.Zsh)
 		case "fish":
-			fmt.Print(complete.Fish())
+			fmt.Print(complete.Fish)
 		default:
 			fmt.Println("unknown shell type")
 		}
@@ -211,6 +212,7 @@ func main() {
 	}
 
 	m := &model{
+		suspending:      false,
 		showCursor:      true,
 		wrap:            true,
 		collapsed:       collapsed,
@@ -266,6 +268,7 @@ type model struct {
 	termWidth, termHeight int
 	head, top, bottom     *Node
 	cursor                int // cursor position [0, termHeight)
+	suspending            bool
 	showCursor            bool
 	wrap                  bool
 	collapsed             bool
@@ -399,6 +402,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.recordHistory()
 			}
 		}
+
+	case tea.ResumeMsg:
+		m.suspending = false
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.digInput.Focused() {
@@ -611,6 +618,10 @@ func (m *model) handleShowSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, keyMap.Suspend):
+		m.suspending = true
+		return m, tea.Suspend
+
 	case key.Matches(msg, keyMap.Quit):
 		return m, tea.Quit
 
@@ -808,6 +819,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keyMap.Print):
 		return m, m.print()
 
+	case key.Matches(msg, keyMap.Open):
+		return m, m.open()
+
 	case key.Matches(msg, keyMap.Dig):
 		at := m.cursorPointsTo()
 		if at.Kind == Err {
@@ -990,6 +1004,10 @@ func (m *model) scrollForward(lines int) {
 }
 
 func (m *model) View() string {
+	if m.suspending {
+		return ""
+	}
+
 	if m.showHelp {
 		statusBar := flex(m.termWidth, ": press q or ? to close help", "")
 		return m.help.View() + "\n" + theme.CurrentTheme.StatusBar(statusBar)
@@ -1595,5 +1613,26 @@ func (m *model) dig(v string) *Node {
 func (m *model) print() tea.Cmd {
 	m.printOnExit = true
 	return tea.Quit
+}
 
+func (m *model) open() tea.Cmd {
+	if engine.FilePath == "" {
+		return nil
+	}
+	command := append(
+		strings.Split(lookup([]string{"FX_EDITOR", "EDITOR"}, "vim"), " "),
+		engine.FilePath,
+	)
+	if command[0] == "vi" || command[0] == "vim" {
+		at := m.cursorPointsTo()
+		if at != nil {
+			tail := command[1:]
+			command = append([]string{command[0]}, fmt.Sprintf("+%d", at.LineNumber))
+			command = append(command, tail...)
+		}
+	}
+	execCmd := exec.Command(command[0], command[1:]...)
+	return tea.ExecProcess(execCmd, func(err error) tea.Msg {
+		return nil
+	})
 }
