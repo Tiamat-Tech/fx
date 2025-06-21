@@ -2,10 +2,13 @@ package jsonx
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 
 	"github.com/dop251/goja"
+
+	"github.com/antonmedv/fx/internal/utils"
 )
 
 func (n *Node) ToValue(vm *goja.Runtime) goja.Value {
@@ -14,7 +17,7 @@ func (n *Node) ToValue(vm *goja.Runtime) goja.Value {
 		return goja.Null()
 
 	case Bool:
-		if n.Value == trueValue {
+		if n.Value == "true" {
 			return vm.ToValue(true)
 		} else {
 			return vm.ToValue(false)
@@ -32,7 +35,7 @@ func (n *Node) ToValue(vm *goja.Runtime) goja.Value {
 		panic(err)
 
 	case String:
-		unquoted, err := strconv.Unquote(n.Value)
+		unquoted, err := utils.Unquote(n.Value)
 		if err != nil {
 			panic(err)
 		}
@@ -50,7 +53,7 @@ func (n *Node) ToValue(vm *goja.Runtime) goja.Value {
 			}
 
 			for it != nil && it != n.End {
-				unquotedKey, err := strconv.Unquote(it.Key)
+				unquotedKey, err := utils.Unquote(it.Key)
 				if err != nil {
 					panic(err)
 				}
@@ -93,6 +96,15 @@ func (n *Node) ToValue(vm *goja.Runtime) goja.Value {
 		}
 
 		return vm.NewArray(arr...)
+
+	case NaN:
+		return vm.ToValue(math.NaN())
+
+	case Infinity:
+		if n.Value[0] == '-' {
+			return vm.ToValue(math.Inf(-1))
+		}
+		return vm.ToValue(math.Inf(1))
 	}
 	panic(fmt.Sprintf("unsupported node kind %d", n.Kind))
 }

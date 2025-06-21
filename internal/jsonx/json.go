@@ -12,6 +12,7 @@ import (
 )
 
 type JsonParser struct {
+	strict     bool
 	rd         io.Reader
 	buf        []byte
 	data       []byte
@@ -23,7 +24,7 @@ type JsonParser struct {
 }
 
 func Parse(b []byte) (*Node, error) {
-	p := NewJsonParser(bytes.NewReader(b))
+	p := NewJsonParser(bytes.NewReader(b), false)
 	node, err := p.Parse()
 	if err == io.EOF {
 		err = nil
@@ -31,13 +32,14 @@ func Parse(b []byte) (*Node, error) {
 	return node, err
 }
 
-func NewJsonParser(rd io.Reader) *JsonParser {
+func NewJsonParser(rd io.Reader, strict bool) *JsonParser {
 	p := &JsonParser{
+		strict:     strict,
 		rd:         rd,
 		buf:        make([]byte, 4096),
 		lineNumber: 1,
 	}
-	p.next()
+	p.next() // Should be called here, to support streaming.
 	return p
 }
 
@@ -84,7 +86,7 @@ func (p *JsonParser) Recover() *Node {
 		Kind:       Err,
 		Value:      lines[0],
 		Index:      -1,
-		LineNumber: p.nextLineNumber(),
+		LineNumber: p.lineNumberPlusPlus(),
 	}
 	for i := 1; i < len(lines); i++ {
 		textNode.Append(&Node{
@@ -92,7 +94,7 @@ func (p *JsonParser) Recover() *Node {
 			Value:      lines[i],
 			Index:      -1,
 			Parent:     textNode,
-			LineNumber: p.nextLineNumber(),
+			LineNumber: p.lineNumberPlusPlus(),
 		})
 	}
 	return textNode
@@ -124,7 +126,12 @@ func (p *JsonParser) next() {
 	p.end++
 }
 
-func (p *JsonParser) nextLineNumber() int {
+func (p *JsonParser) back() {
+	p.end--
+	p.char = p.data[p.end]
+}
+
+func (p *JsonParser) lineNumberPlusPlus() int {
 	n := p.lineNumber
 	p.lineNumber++
 	return n
@@ -137,18 +144,24 @@ func (p *JsonParser) parseValue() *Node {
 	switch p.char {
 	case '"':
 		l = p.parseString()
-	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
-		l = p.parseNumber()
+	case '-':
+		l = p.parseMinus()
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		l = p.parseNumber(p.end - 1)
 	case '{':
 		l = p.parseObject()
 	case '[':
 		l = p.parseArray()
 	case 't':
-		l = p.parseKeyword(trueValue, Bool)
+		l = p.parseKeyword("true", Bool)
 	case 'f':
-		l = p.parseKeyword(falseValue, Bool)
+		l = p.parseKeyword("false", Bool)
 	case 'n':
-		l = p.parseKeyword(nullValue, Null)
+		l = p.parseNullOrNan()
+	case 'N':
+		l = p.parseNan(p.end - 1)
+	case 'i', 'I':
+		l = p.parseInfinity(p.end - 1)
 	default:
 		panic(fmt.Sprintf("Unexpected character %q", p.char))
 	}
@@ -162,7 +175,7 @@ func (p *JsonParser) parseString() *Node {
 		Kind:       String,
 		Depth:      p.depth,
 		Value:      p.scanString(),
-		LineNumber: p.nextLineNumber(),
+		LineNumber: p.lineNumberPlusPlus(),
 	}
 }
 
@@ -209,20 +222,25 @@ func (p *JsonParser) scanString() string {
 	return str
 }
 
-func (p *JsonParser) parseNumber() *Node {
+func (p *JsonParser) parseMinus() *Node {
+	start := p.end - 1
+	p.next()
+	switch p.char {
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return p.parseNumber(start)
+	case 'n', 'N':
+		return p.parseNan(start)
+	case 'i', 'I':
+		return p.parseInfinity(start)
+	}
+	panic(fmt.Sprintf("Invalid character %q in number", p.char))
+}
+
+func (p *JsonParser) parseNumber(start int) *Node {
 	num := &Node{
 		Kind:       Number,
 		Depth:      p.depth,
-		LineNumber: p.nextLineNumber(),
-	}
-	start := p.end - 1
-
-	// Handle negative numbers
-	if p.char == '-' {
-		p.next()
-		if !utils.IsDigit(p.char) {
-			panic(fmt.Sprintf("Invalid character %q in number", p.char))
-		}
+		LineNumber: p.lineNumberPlusPlus(),
 	}
 
 	// Leading zero
@@ -267,7 +285,7 @@ func (p *JsonParser) parseObject() *Node {
 	object := &Node{
 		Kind:       Object,
 		Depth:      p.depth,
-		LineNumber: p.nextLineNumber(),
+		LineNumber: p.lineNumberPlusPlus(),
 	}
 	object.Value = curlyBracketOpen
 
@@ -314,6 +332,9 @@ func (p *JsonParser) parseObject() *Node {
 			p.next()
 			p.skipWhitespace()
 			if p.char == '}' {
+				if p.strict {
+					panic("Trailing comma is not allowed in strict mode")
+				}
 				object.End.Comma = false
 			} else {
 				continue
@@ -324,7 +345,7 @@ func (p *JsonParser) parseObject() *Node {
 			closeBracket := &Node{
 				Kind:       Object,
 				Depth:      p.depth,
-				LineNumber: p.nextLineNumber(),
+				LineNumber: p.lineNumberPlusPlus(),
 			}
 			closeBracket.Value = curlyBracketClose
 			closeBracket.Parent = object
@@ -342,7 +363,7 @@ func (p *JsonParser) parseArray() *Node {
 	arr := &Node{
 		Kind:       Array,
 		Depth:      p.depth,
-		LineNumber: p.nextLineNumber(),
+		LineNumber: p.lineNumberPlusPlus(),
 	}
 	arr.Value = squareBracketOpen
 
@@ -371,6 +392,9 @@ func (p *JsonParser) parseArray() *Node {
 			p.next()
 			p.skipWhitespace()
 			if p.char == ']' {
+				if p.strict {
+					panic("Trailing comma is not allowed in strict mode")
+				}
 				arr.End.Comma = false
 			} else {
 				continue
@@ -381,7 +405,7 @@ func (p *JsonParser) parseArray() *Node {
 			closeBracket := &Node{
 				Kind:       Array,
 				Depth:      p.depth,
-				LineNumber: p.nextLineNumber(),
+				LineNumber: p.lineNumberPlusPlus(),
 			}
 			closeBracket.Value = squareBracketClose
 			closeBracket.Parent = arr
@@ -396,6 +420,7 @@ func (p *JsonParser) parseArray() *Node {
 }
 
 func (p *JsonParser) parseKeyword(name string, kind Kind) *Node {
+	start := p.end - 1
 	for i := 1; i < len(name); i++ {
 		p.next()
 		if p.char != name[i] {
@@ -403,19 +428,111 @@ func (p *JsonParser) parseKeyword(name string, kind Kind) *Node {
 		}
 	}
 	p.next()
-
-	nextCharIsSpecial := isWhitespace(p.char) || p.char == ',' || p.char == '}' || p.char == ']' || p.char == 0
-	if nextCharIsSpecial {
+	if isEndOfValue(p.char) {
 		keyword := &Node{
 			Kind:       kind,
 			Depth:      p.depth,
-			LineNumber: p.nextLineNumber(),
+			Value:      string(p.data[start : p.end-1]),
+			LineNumber: p.lineNumberPlusPlus(),
 		}
-		keyword.Value = name
 		return keyword
 	}
 
 	panic(fmt.Sprintf("Unexpected character %q in keyword", p.char))
+}
+
+func (p *JsonParser) parseNullOrNan() *Node {
+	p.next()
+	if p.char == 'u' {
+		p.next()
+		if p.char == 'l' {
+			p.next()
+			if p.char == 'l' {
+				p.next()
+				if isEndOfValue(p.char) {
+					return &Node{
+						Kind:       Null,
+						Depth:      p.depth,
+						Value:      "null",
+						LineNumber: p.lineNumberPlusPlus(),
+					}
+				}
+			}
+		}
+	} else if p.char == 'a' {
+		p.back() // Put back the 'a'.
+		return p.parseNan(p.end - 1)
+	}
+	panic(fmt.Sprintf("Unexpected character %q", p.char))
+}
+
+func (p *JsonParser) parseNan(start int) *Node {
+	p.next()
+	if !p.strict {
+		if p.char == 'a' || p.char == 'A' {
+			p.next()
+			if p.char == 'n' || p.char == 'N' {
+				p.next()
+				if isEndOfValue(p.char) {
+					return &Node{
+						Kind:       NaN,
+						Depth:      p.depth,
+						Value:      string(p.data[start : p.end-1]),
+						LineNumber: p.lineNumberPlusPlus(),
+					}
+				}
+			}
+		}
+	}
+	panic(fmt.Sprintf("Unexpected character %q", p.char))
+}
+
+func (p *JsonParser) parseInfinity(start int) *Node {
+	p.next()
+	if !p.strict {
+		if p.char == 'n' || p.char == 'N' {
+			p.next()
+			if p.char == 'f' || p.char == 'F' {
+				p.next()
+				if isEndOfValue(p.char) {
+					return &Node{
+						Kind:       Infinity,
+						Depth:      p.depth,
+						Value:      string(p.data[start : p.end-1]),
+						LineNumber: p.lineNumberPlusPlus(),
+					}
+				}
+				if p.char == 'i' {
+					p.next()
+					if p.char == 'n' {
+						p.next()
+						if p.char == 'i' {
+							p.next()
+							if p.char == 't' {
+								p.next()
+								if p.char == 'y' {
+									p.next()
+									if isEndOfValue(p.char) {
+										return &Node{
+											Kind:       Infinity,
+											Depth:      p.depth,
+											Value:      string(p.data[start : p.end-1]),
+											LineNumber: p.lineNumberPlusPlus(),
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	panic(fmt.Sprintf("Unexpected character %q", p.char))
+}
+
+func isEndOfValue(ch byte) bool {
+	return isWhitespace(ch) || ch == ',' || ch == '}' || ch == ']' || ch == 0 // 0 is EOF
 }
 
 func isWhitespace(ch byte) bool {
@@ -428,6 +545,9 @@ func (p *JsonParser) skipWhitespace() {
 		case ' ', '\t', '\n', '\r':
 			p.next()
 		case '/':
+			if p.strict {
+				panic("Comments are not allowed in strict mode")
+			}
 			p.skipComment()
 		default:
 			return
@@ -491,7 +611,7 @@ func (p *JsonParser) errorSnippet(message string) error {
 	}
 
 	return fmt.Errorf(
-		"%s on line %d.\n\n%s\n\n",
+		"%s on line %d.\n\n%s\n",
 		message,
 		p.lineNumber,
 		strings.Join(paddedLines, "\n"),
