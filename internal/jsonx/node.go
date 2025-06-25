@@ -16,6 +16,8 @@ const (
 	String
 	Object
 	Array
+	NaN
+	Infinity
 )
 
 type Node struct {

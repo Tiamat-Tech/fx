@@ -9,9 +9,9 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -30,15 +30,18 @@ import (
 	"github.com/antonmedv/fx/internal/fuzzy"
 	"github.com/antonmedv/fx/internal/jsonpath"
 	. "github.com/antonmedv/fx/internal/jsonx"
+	"github.com/antonmedv/fx/internal/maze"
 	"github.com/antonmedv/fx/internal/theme"
 	"github.com/antonmedv/fx/internal/utils"
 )
 
 var (
-	flagYaml  bool
-	flagRaw   bool
-	flagSlurp bool
-	flagComp  bool // Echo autocomplete integration code.
+	flagYaml   bool
+	flagRaw    bool
+	flagSlurp  bool
+	flagComp   bool
+	flagStrict bool
+	flagMaze   bool
 )
 
 func main() {
@@ -94,9 +97,18 @@ func main() {
 		case "-rs", "-sr":
 			flagRaw = true
 			flagSlurp = true
+		case "--strict":
+			flagStrict = true
+		case "--maze":
+			flagMaze = true
 		default:
 			args = append(args, arg)
 		}
+	}
+
+	if flagMaze {
+		maze.Run()
+		return
 	}
 
 	if flagYaml && flagRaw {
@@ -109,11 +121,11 @@ func main() {
 		flag.Parse()
 		switch *shell {
 		case "bash":
-			fmt.Print(complete.Bash())
+			fmt.Print(complete.Bash)
 		case "zsh":
-			fmt.Print(complete.Zsh())
+			fmt.Print(complete.Zsh)
 		case "fish":
-			fmt.Print(complete.Fish())
+			fmt.Print(complete.Fish)
 		default:
 			fmt.Println("unknown shell type")
 		}
@@ -157,15 +169,14 @@ func main() {
 			os.Exit(1)
 			return
 		}
-		parser = NewJsonParser(bytes.NewReader(jsonBytes))
+		parser = NewJsonParser(bytes.NewReader(jsonBytes), flagStrict)
 	} else if flagRaw {
 		parser = NewLineParser(src)
 	} else {
-		parser = NewJsonParser(src)
+		parser = NewJsonParser(src, flagStrict)
 	}
 
 	if len(args) > 0 || flagSlurp {
-		debug.SetGCPercent(-1)
 		writeOut := func(s string) { fmt.Println(s) }
 		writeErr := func(s string) { fmt.Fprintln(os.Stderr, s) }
 		exitCode := engine.Start(parser, args, flagSlurp, writeOut, writeErr)
@@ -183,6 +194,9 @@ func main() {
 	digInput.Cursor.Style = lipgloss.NewStyle().
 		Background(lipgloss.Color("15")).
 		Foreground(lipgloss.Color("0"))
+
+	commandInput := textinput.New()
+	commandInput.Prompt = ":"
 
 	searchInput := textinput.New()
 	searchInput.Prompt = "/"
@@ -211,6 +225,7 @@ func main() {
 	}
 
 	m := &model{
+		suspending:      false,
 		showCursor:      true,
 		wrap:            true,
 		collapsed:       collapsed,
@@ -219,6 +234,7 @@ func main() {
 		fileName:        fileName,
 		digInput:        digInput,
 		gotoSymbolInput: gotoSymbolInput,
+		commandInput:    commandInput,
 		searchInput:     searchInput,
 		search:          newSearch(),
 		spinner:         spinnerModel,
@@ -242,6 +258,11 @@ func main() {
 			node, err := parser.Parse()
 			if err != nil {
 				if err == io.EOF {
+					p.Send(eofMsg{})
+					break
+				}
+				if flagStrict {
+					p.Send(errorMsg{err: err})
 					break
 				}
 				textNode := parser.Recover()
@@ -260,12 +281,18 @@ func main() {
 	if m.printOnExit {
 		fmt.Println(m.cursorValue())
 	}
+
+	if m.printErrorOnExit != nil {
+		fmt.Print(m.printErrorOnExit.Error())
+	}
 }
 
 type model struct {
 	termWidth, termHeight int
 	head, top, bottom     *Node
+	eof                   bool
 	cursor                int // cursor position [0, termHeight)
+	suspending            bool
 	showCursor            bool
 	wrap                  bool
 	collapsed             bool
@@ -276,6 +303,7 @@ type model struct {
 	fileName              string
 	digInput              textinput.Model
 	gotoSymbolInput       textinput.Model
+	commandInput          textinput.Model
 	searchInput           textinput.Model
 	search                *search
 	yank                  bool
@@ -284,6 +312,7 @@ type model struct {
 	showPreview           bool
 	preview               viewport.Model
 	printOnExit           bool
+	printErrorOnExit      error
 	spinner               spinner.Model
 	locationHistory       []location
 	locationIndex         int // position in locationHistory
@@ -300,6 +329,12 @@ type location struct {
 type nodeMsg struct {
 	node *Node
 }
+
+type errorMsg struct {
+	err error
+}
+
+type eofMsg struct{}
 
 func (m *model) Init() tea.Cmd {
 	return m.spinner.Tick
@@ -326,6 +361,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case eofMsg:
+		m.eof = true
+		return m, nil
+
+	case errorMsg:
+		m.printErrorOnExit = msg.err
+		return m, tea.Quit
+
 	case nodeMsg:
 		if m.wrap {
 			Wrap(msg.node, m.viewWidth())
@@ -351,7 +394,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.head == nil {
+		if !m.eof {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -400,9 +443,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tea.ResumeMsg:
+		m.suspending = false
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.digInput.Focused() {
 			return m.handleDigKey(msg)
+		}
+		if m.commandInput.Focused() {
+			return m.handleGotoLineKey(msg)
 		}
 		if m.searchInput.Focused() {
 			return m.handleSearchKey(msg)
@@ -535,6 +585,26 @@ func (m *model) handlePreviewKey(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *model) handleGotoLineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch {
+	case msg.Type == tea.KeyEscape:
+		m.commandInput.Blur()
+		m.commandInput.SetValue("")
+		m.showCursor = true
+
+	case msg.Type == tea.KeyEnter:
+		m.commandInput.Blur()
+		command := m.commandInput.Value()
+		m.commandInput.SetValue("")
+		return m.runCommand(command)
+
+	default:
+		m.commandInput, cmd = m.commandInput.Update(msg)
+	}
+	return m, cmd
+}
+
 func (m *model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch {
@@ -611,6 +681,10 @@ func (m *model) handleShowSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, keyMap.Suspend):
+		m.suspending = true
+		return m, tea.Suspend
+
 	case key.Matches(msg, keyMap.Quit):
 		return m, tea.Quit
 
@@ -808,6 +882,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keyMap.Print):
 		return m, m.print()
 
+	case key.Matches(msg, keyMap.Open):
+		return m, m.open()
+
 	case key.Matches(msg, keyMap.Dig):
 		at := m.cursorPointsTo()
 		if at.Kind == Err {
@@ -837,6 +914,11 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.recordHistory()
 			}
 		}
+
+	case key.Matches(msg, keyMap.CommandLine):
+		m.commandInput.CursorEnd()
+		m.commandInput.Width = m.termWidth - 2 // -1 for the prompt, -1 for the cursor
+		m.commandInput.Focus()
 
 	case key.Matches(msg, keyMap.Search):
 		m.searchInput.CursorEnd()
@@ -989,195 +1071,6 @@ func (m *model) scrollForward(lines int) {
 	m.head = it
 }
 
-func (m *model) View() string {
-	if m.showHelp {
-		statusBar := flex(m.termWidth, ": press q or ? to close help", "")
-		return m.help.View() + "\n" + theme.CurrentTheme.StatusBar(statusBar)
-	}
-
-	if m.showPreview {
-		statusBar := flex(m.termWidth, m.cursorPath(), m.fileName)
-		return m.preview.View() + "\n" + theme.CurrentTheme.StatusBar(statusBar)
-	}
-
-	var screen []byte
-	printedLines := 0
-	n := m.head
-
-	var cursorLineNumber int
-
-	for lineNumber := 0; lineNumber < m.viewHeight(); lineNumber++ {
-		if n == nil {
-			break
-		}
-
-		if m.showLineNumbers {
-			lineNumbersWidth := len(strconv.Itoa(m.totalLines))
-			if n.LineNumber == 0 {
-				screen = append(screen, bytes.Repeat([]byte{' '}, lineNumbersWidth)...)
-			} else {
-				lineNumStr := fmt.Sprintf("%*d", lineNumbersWidth, n.LineNumber)
-				screen = append(screen, theme.CurrentTheme.LineNumber(lineNumStr)...)
-			}
-			screen = append(screen, ' ', ' ')
-		}
-
-		for ident := 0; ident < int(n.Depth); ident++ {
-			screen = append(screen, ' ', ' ')
-		}
-
-		isSelected := m.cursor == lineNumber
-		if isSelected {
-			if n.LineNumber == 0 {
-				cursorLineNumber = n.Parent.LineNumber
-			} else {
-				cursorLineNumber = n.LineNumber
-			}
-		}
-		if !m.showCursor {
-			isSelected = false // don't highlight the cursor while iterating search results
-		}
-
-		isRef := false
-		isRefSelected := false
-		var isRefValue string
-
-		if n.Key != "" {
-			screen = append(screen, m.prettyKey(n, isSelected)...)
-			screen = append(screen, theme.Colon...)
-
-			isRefValue, isRef = isRefNode(n)
-			isRefSelected = isRef && isSelected
-			isSelected = false // don't highlight the key's value
-		}
-
-		if isRef {
-			screen = append(screen, theme.CurrentTheme.String("\"")...)
-			screen = append(screen, theme.CurrentTheme.Ref(isRefValue)...)
-			screen = append(screen, theme.CurrentTheme.String("\"")...)
-		} else {
-			screen = append(screen, m.prettyPrint(n, isSelected)...)
-		}
-
-		if n.IsCollapsed() {
-			if n.Kind == Object {
-				if n.Collapsed.Key != "" {
-					screen = append(screen, theme.CurrentTheme.Preview(n.Collapsed.Key)...)
-					screen = append(screen, theme.ColonPreview...)
-					if len(n.Collapsed.Value) > 0 &&
-						len(n.Collapsed.Value) < 42 &&
-						n.Collapsed.Kind != Object &&
-						n.Collapsed.Kind != Array {
-						screen = append(screen, theme.CurrentTheme.Preview(n.Collapsed.Value)...)
-						if n.Size > 1 {
-							screen = append(screen, theme.CommaPreview...)
-							screen = append(screen, theme.Dot3...)
-						}
-					} else {
-						screen = append(screen, theme.Dot3...)
-					}
-				}
-				screen = append(screen, theme.CloseCurlyBracket...)
-			} else if n.Kind == Array {
-				screen = append(screen, theme.Dot3...)
-				screen = append(screen, theme.CloseSquareBracket...)
-			}
-			if n.End != nil && n.End.Comma {
-				screen = append(screen, theme.Comma...)
-			}
-		}
-		if n.Comma {
-			screen = append(screen, theme.Comma...)
-		}
-
-		if m.showSizes && (n.Kind == Array || n.Kind == Object) {
-			if n.IsCollapsed() || n.Size > 1 {
-				screen = append(screen, theme.CurrentTheme.Size(fmt.Sprintf(" |%d|", n.Size))...)
-			}
-		}
-
-		if isRefSelected {
-			screen = append(screen, theme.CurrentTheme.Preview("  ctrl+g goto")...)
-		}
-
-		screen = append(screen, '\n')
-		printedLines++
-		n = n.Next
-	}
-
-	for i := printedLines; i < m.viewHeight(); i++ {
-		if m.head != nil {
-			screen = append(screen, theme.Empty...)
-		}
-		screen = append(screen, '\n')
-	}
-
-	if m.gotoSymbolInput.Focused() && m.fuzzyMatch != nil {
-		var matchedStr []byte
-		str := m.fuzzyMatch.Str
-		for i := 0; i < len(str); i++ {
-			if utils.Contains(i, m.fuzzyMatch.Pos) {
-				matchedStr = append(matchedStr, theme.CurrentTheme.Search(string(str[i]))...)
-			} else {
-				matchedStr = append(matchedStr, theme.CurrentTheme.StatusBar(string(str[i]))...)
-			}
-		}
-		repeatCount := m.termWidth - len(str)
-		if repeatCount > 0 {
-			matchedStr = append(matchedStr, theme.CurrentTheme.StatusBar(strings.Repeat(" ", repeatCount))...)
-		}
-		screen = append(screen, matchedStr...)
-	} else if m.digInput.Focused() {
-		screen = append(screen, m.digInput.View()...)
-	} else {
-		if m.head == nil {
-			indicator := fmt.Sprintf(" indexing %s ", m.spinner.View())
-			statusBar := flex(m.termWidth+2, indicator, m.fileName)
-			screen = append(screen, theme.CurrentTheme.StatusBar(statusBar)...)
-		} else {
-			currentPath := m.cursorPath()
-			percent := int(float64(cursorLineNumber) / float64(m.totalLines) * 100)
-			if cursorLineNumber == 1 {
-				percent = min(1, percent)
-			}
-			info := fmt.Sprintf("%d%% %s", percent, m.fileName)
-			statusBar := flex(m.termWidth, currentPath, info)
-			screen = append(screen, theme.CurrentTheme.StatusBar(statusBar)...)
-		}
-	}
-
-	if m.yank {
-		screen = append(screen, '\n')
-		screen = append(screen, []byte("(y)value  (p)path  (k)key")...)
-	} else if m.showShowSelector {
-		screen = append(screen, '\n')
-		screen = append(screen, []byte("(s)sizes  (l)line numbers")...)
-	} else if m.gotoSymbolInput.Focused() {
-		screen = append(screen, '\n')
-		screen = append(screen, m.gotoSymbolInput.View()...)
-	} else if m.searchInput.Focused() {
-		screen = append(screen, '\n')
-		screen = append(screen, m.searchInput.View()...)
-	} else if m.searchInput.Value() != "" {
-		screen = append(screen, '\n')
-		re, ci := regexCase(m.searchInput.Value())
-		re = "/" + re + "/"
-		if ci {
-			re += "i"
-		}
-		if m.search.err != nil {
-			screen = append(screen, flex(m.termWidth, re, m.search.err.Error())...)
-		} else if len(m.search.results) == 0 {
-			screen = append(screen, flex(m.termWidth, re, "not found")...)
-		} else {
-			cursor := fmt.Sprintf("found: [%v/%v]", m.search.cursor+1, len(m.search.results))
-			screen = append(screen, flex(m.termWidth, re, cursor)...)
-		}
-	}
-
-	return string(screen)
-}
-
 func (m *model) prettyKey(node *Node, selected bool) []byte {
 	b := node.Key
 
@@ -1249,6 +1142,9 @@ func (m *model) viewWidth() int {
 
 func (m *model) viewHeight() int {
 	if m.gotoSymbolInput.Focused() {
+		return m.termHeight - 2
+	}
+	if m.commandInput.Focused() {
 		return m.termHeight - 2
 	}
 	if m.searchInput.Focused() || m.searchInput.Value() != "" {
@@ -1362,7 +1258,7 @@ func (m *model) cursorValue() string {
 		if at.Chunk != "" && at.Value == "" {
 			at = parent
 		}
-		if at.Kind == Object || at.Kind == Array {
+		if len(at.Value) >= 1 && at.Value[0] == '}' || at.Value[0] == ']' {
 			at = parent
 		}
 	}
@@ -1595,5 +1491,26 @@ func (m *model) dig(v string) *Node {
 func (m *model) print() tea.Cmd {
 	m.printOnExit = true
 	return tea.Quit
+}
 
+func (m *model) open() tea.Cmd {
+	if engine.FilePath == "" {
+		return nil
+	}
+	command := append(
+		strings.Split(lookup([]string{"FX_EDITOR", "EDITOR"}, "vim"), " "),
+		engine.FilePath,
+	)
+	if command[0] == "vi" || command[0] == "vim" {
+		at := m.cursorPointsTo()
+		if at != nil {
+			tail := command[1:]
+			command = append([]string{command[0]}, fmt.Sprintf("+%d", at.LineNumber))
+			command = append(command, tail...)
+		}
+	}
+	execCmd := exec.Command(command[0], command[1:]...)
+	return tea.ExecProcess(execCmd, func(err error) tea.Msg {
+		return nil
+	})
 }

@@ -16,6 +16,11 @@ const console = {
   },
 }
 
+const YAML = {
+  stringify: x => __yaml_stringify__(x),
+  parse: x => JSON.parse(__yaml_parse__(x)),
+}
+
 const skip = Symbol('skip')
 
 function apply(fn, ...args) {
@@ -40,10 +45,54 @@ function sort(x) {
   throw new Error(`Cannot sort ${typeof x}`)
 }
 
+function filter(fn) {
+  return function (x) {
+    if (Array.isArray(x)) {
+      return x.filter((v, i) => fn(v, i))
+    } else if (x !== null && typeof x === 'object') {
+      const result = {}
+      for (const [k, v] of Object.entries(x)) {
+        if (fn(v, k)) {
+          result[k] = v
+        }
+      }
+      return result
+    } else {
+      throw new Error(`Cannot filter ${typeof x}`)
+    }
+  }
+}
+
 function map(fn) {
   return function (x) {
-    if (Array.isArray(x)) return x.map((v, i) => fn(v, i))
-    throw new Error(`Cannot map ${typeof x}`)
+    if (Array.isArray(x)) {
+      return x.map((v, i) => fn(v, i))
+    } else if (x !== null && typeof x === 'object') {
+      const result = {}
+      for (const [k, v] of Object.entries(x)) {
+        result[k] = fn(v, k)
+      }
+      return result
+    } else {
+      throw new Error(`Cannot map over ${typeof x}`)
+    }
+  }
+}
+
+function walk(fn) {
+  return function recurse(value, key = null) {
+    if (Array.isArray(value)) {
+      const mapped = value.map((v, i) => recurse(v, i))
+      return fn(mapped, key)
+    } else if (value !== null && typeof value === 'object') {
+      const result = {}
+      for (const [k, v] of Object.entries(value)) {
+        result[k] = recurse(v, k)
+      }
+      return fn(result, key)
+    } else {
+      return fn(value, key)
+    }
   }
 }
 
@@ -119,6 +168,15 @@ function list(x) {
 }
 
 function save(x) {
-  __write__(JSON.stringify(x, null, 2))
+  if (typeof x === 'undefined') throw new Error('Cannot save undefined')
+  __save__(__stringify__(x, null, 2))
   return x
+}
+
+function toBase64(x) {
+  return __toBase64__(x)
+}
+
+function fromBase64(x) {
+  return __fromBase64__(x)
 }

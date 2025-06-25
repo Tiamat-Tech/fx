@@ -27,6 +27,7 @@ type Theme struct {
 	Size       Color
 	Ref        Color
 	LineNumber Color
+	Error      Color
 }
 
 type Color func(s string) string
@@ -46,6 +47,10 @@ func Value(kind jsonx.Kind, selected bool) Color {
 			return CurrentTheme.Syntax
 		case jsonx.Number:
 			return CurrentTheme.Number
+		case jsonx.NaN:
+			return CurrentTheme.Error
+		case jsonx.Infinity:
+			return CurrentTheme.Error
 		default:
 			return noColor
 		}
@@ -101,6 +106,7 @@ var (
 	defaultNull       = fg("243")
 	defaultSize       = toColor(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render)
 	defaultLineNumber = toColor(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render)
+	defaultError      = toColor(lipgloss.NewStyle().Background(lipgloss.Color("196")).Foreground(lipgloss.Color("255")).Render)
 )
 
 var (
@@ -114,22 +120,25 @@ var (
 	CloseSquareBracket string
 )
 
+var NoColor = Theme{
+	Cursor:     defaultCursor,
+	Syntax:     noColor,
+	Preview:    noColor,
+	StatusBar:  noColor,
+	Search:     defaultSearch,
+	Key:        noColor,
+	String:     noColor,
+	Null:       noColor,
+	Boolean:    noColor,
+	Number:     noColor,
+	Size:       noColor,
+	Ref:        noColor,
+	LineNumber: defaultLineNumber,
+	Error:      defaultError,
+}
+
 var themes = map[string]Theme{
-	"0": {
-		Cursor:     defaultCursor,
-		Syntax:     noColor,
-		Preview:    noColor,
-		StatusBar:  noColor,
-		Search:     defaultSearch,
-		Key:        noColor,
-		String:     noColor,
-		Null:       noColor,
-		Boolean:    noColor,
-		Number:     noColor,
-		Size:       noColor,
-		Ref:        noColor,
-		LineNumber: defaultLineNumber,
-	},
+	"0": NoColor,
 	"1": {
 		Cursor:     defaultCursor,
 		Syntax:     noColor,
@@ -144,6 +153,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("2"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"2": {
 		Cursor:     defaultCursor,
@@ -159,6 +169,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("4"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"3": {
 		Cursor:     defaultCursor,
@@ -174,6 +185,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("11"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"4": {
 		Cursor:     defaultCursor,
@@ -189,6 +201,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("#00BBF9"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"5": {
 		Cursor:     defaultCursor,
@@ -204,6 +217,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("#f4d35e"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"6": {
 		Cursor:     defaultCursor,
@@ -219,6 +233,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("#6BCB77"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"7": {
 		Cursor:     defaultCursor,
@@ -234,6 +249,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("213"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"8": {
 		Cursor:     defaultCursor,
@@ -249,6 +265,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("195"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"🔵": {
 		Cursor: toColor(lipgloss.NewStyle().
@@ -267,6 +284,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underline,
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 	"🥝": {
 		Cursor:     defaultCursor,
@@ -282,6 +300,7 @@ var themes = map[string]Theme{
 		Size:       defaultSize,
 		Ref:        underlineFg("82"),
 		LineNumber: defaultLineNumber,
+		Error:      defaultError,
 	},
 }
 
@@ -338,6 +357,13 @@ func ThemeTester() {
 			colon,
 			t.Null("null"),
 			comma)
+		fmt.Printf("  %v%v %v%v%v\n",
+			t.Key("\"collapsed\""),
+			colon,
+			t.Syntax("{"),
+			t.Preview("\"preview\":…"),
+			t.Syntax("}"),
+		)
 		fmt.Println(t.Syntax("}"))
 		println()
 	}

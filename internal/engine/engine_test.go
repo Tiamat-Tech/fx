@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/antonmedv/fx/internal/engine"
 	"github.com/antonmedv/fx/internal/jsonx"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestEngine(t *testing.T) {
@@ -42,7 +43,7 @@ func TestEngine(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			parser := jsonx.NewJsonParser(strings.NewReader(tc.input))
+			parser := jsonx.NewJsonParser(strings.NewReader(tc.input), false)
 
 			var outs, errs []string
 			writeOut := func(s string) { outs = append(outs, s) }
@@ -59,7 +60,7 @@ func TestEngine(t *testing.T) {
 
 func TestStart_InvalidJSON(t *testing.T) {
 	input := `{"unclosed": 1`
-	parser := jsonx.NewJsonParser(strings.NewReader(input))
+	parser := jsonx.NewJsonParser(strings.NewReader(input), false)
 
 	var outs, errs []string
 	writeOut := func(s string) { outs = append(outs, s) }
@@ -73,7 +74,7 @@ func TestStart_InvalidJSON(t *testing.T) {
 
 func TestStart_FastPath_InvalidJSON(t *testing.T) {
 	input := `{"unclosed": 1`
-	parser := jsonx.NewJsonParser(strings.NewReader(input))
+	parser := jsonx.NewJsonParser(strings.NewReader(input), false)
 
 	var outs, errs []string
 	writeOut := func(s string) { outs = append(outs, s) }
@@ -83,4 +84,33 @@ func TestStart_FastPath_InvalidJSON(t *testing.T) {
 
 	assert.Equal(t, 1, exitCode)
 	assert.Len(t, errs, 1, "Expected one error message")
+}
+
+func TestStart_EscapeSequences(t *testing.T) {
+	input := `{"emoji": "\ud83d\ude80"}`
+	parser := jsonx.NewJsonParser(strings.NewReader(input), false)
+
+	var outs, errs []string
+	writeOut := func(s string) { outs = append(outs, s) }
+	writeErr := func(s string) { errs = append(errs, s) }
+
+	exitCode := engine.Start(parser, []string{".emoji"}, false, writeOut, writeErr)
+
+	assert.Equal(t, 0, exitCode)
+	assert.Len(t, errs, 0, "Expected no error messages")
+	assert.Equal(t, "🚀", outs[0])
+}
+
+func TestStart_EscapeSequences_in_key(t *testing.T) {
+	input := `{"\ud83d\ude80": "\ud83d\ude80"}`
+	parser := jsonx.NewJsonParser(strings.NewReader(input), false)
+
+	var outs, errs []string
+	writeOut := func(s string) { outs = append(outs, s) }
+	writeErr := func(s string) { errs = append(errs, s) }
+
+	exitCode := engine.Start(parser, []string{"x => x"}, false, writeOut, writeErr)
+
+	assert.Equal(t, 0, exitCode)
+	assert.Len(t, errs, 0, "Expected no error messages")
 }

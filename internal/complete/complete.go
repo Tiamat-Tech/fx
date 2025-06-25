@@ -15,76 +15,58 @@ import (
 	"github.com/antonmedv/fx/internal/shlex"
 )
 
-var flags = []string{
-	"--help",
-	"--raw",
-	"--slurp",
-	"--themes",
-	"--version",
-	"--yaml",
-	"-h",
-	"-r",
-	"-s",
-	"-v",
+type pair struct {
+	display string
+	value   string
 }
 
-var globals = []string{
-	"JSON.stringify",
-	"JSON.parse",
-	"YAML.stringify",
-	"YAML.parse",
-	"Object.keys",
-	"Object.values",
-	"Object.entries",
-	"Object.fromEntries",
-	"Array.isArray",
-	"Array.from",
-	"console.log",
-	"len",
-	"uniq",
-	"sort",
-	"map",
-	"sortBy",
-	"groupBy",
-	"chunk",
-	"zip",
-	"flatten",
-	"reverse",
-	"keys",
-	"values",
-	"skip",
-	"list",
+var flags = []pair{
+	{"--help", "--help"},
+	{"--raw", "--raw"},
+	{"--slurp", "--slurp"},
+	{"--themes", "--themes"},
+	{"--version", "--version"},
+	{"--yaml", "--yaml"},
+	{"--strict", "--strict"},
 }
+
+//go:embed complete.bash
+var Bash string
+
+//go:embed complete.zsh
+var Zsh string
+
+//go:embed complete.fish
+var Fish string
 
 //go:embed prelude.js
 var prelude string
 
 func Complete() bool {
 	compLine, ok := os.LookupEnv("COMP_LINE")
-
 	if ok && len(os.Args) >= 3 {
-		doComplete(compLine, os.Args[2])
+		doComplete(compLine, os.Args[2], false)
 		return true
 	}
 
 	compZsh, ok := os.LookupEnv("COMP_ZSH")
 	if ok {
-		doComplete(compZsh, lastWord(compZsh))
+		doComplete(compZsh, lastWord(compZsh), true)
 		return true
 	}
 
 	compFish, ok := os.LookupEnv("COMP_FISH")
 	if ok {
-		doComplete(compFish, lastWord(compFish))
+		doComplete(compFish, lastWord(compFish), false)
 		return true
 	}
 
 	return false
 }
 
-func doComplete(compLine string, compWord string) {
+func doComplete(compLine string, compWord string, withDisplay bool) {
 	if strings.HasPrefix(compWord, "-") {
-		compReply(filterReply(flags, compWord))
+		compReply(filterReply(flags, compWord), withDisplay)
 		return
 	}
 
@@ -110,21 +92,21 @@ func doComplete(compLine string, compWord string) {
 	if len(args) == 0 {
 		return
 	} else if len(args) == 1 {
-		fileComplete(compWord)
+		reply := fileComplete(compWord)
+		compReply(reply, withDisplay)
 		return
 	} else if len(args) == 2 {
 		isSecondArgIsFile = isFile(args[1])
 		if !isSecondArgIsFile {
-			fileComplete(compWord)
+			reply := fileComplete(compWord)
+			compReply(reply, withDisplay)
 			return
 		}
 	} else {
 		isSecondArgIsFile = isFile(args[1])
 	}
 
-	if globalsComplete(compWord) {
-		return
-	}
+	var reply []pair
 
 	if isSecondArgIsFile {
 		file := args[1]
@@ -132,6 +114,13 @@ func doComplete(compLine string, compWord string) {
 		hasYamlExt, _ := regexp.MatchString(`(?i)\.ya?ml$`, file)
 		if !flagYaml && hasYamlExt {
 			flagYaml = true
+		}
+
+		if strings.HasPrefix(file, "~") {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				file = filepath.Join(home, file[1:])
+			}
 		}
 
 		input, err := os.ReadFile(file)
@@ -153,25 +142,48 @@ func doComplete(compLine string, compWord string) {
 			}
 		}
 
-		codeComplete(input, args, compWord)
+		reply = append(reply, keysComplete(input, args, compWord)...)
 	}
-}
 
-func globalsComplete(compWord string) bool {
-	if compWord == "" {
-		// We will not complete globals if compWord is empty,
-		// as we want to show only object keys.
-		return false
-	}
-	reply := filterReply(globals, compWord)
+	reply = filterReply(reply, compWord)
 	if len(reply) > 0 {
-		compReply(reply)
-		return true
+		compReply(reply, withDisplay)
+		return
 	}
-	return false
+
+	if len(compWord) > 0 {
+		// Only show globals if compWord is not empty,
+		// as we do not want to be very verbose and show all globals.
+		compReply(filterReply(globalsComplete(), compWord), withDisplay)
+	}
 }
 
-func codeComplete(input []byte, args []string, compWord string) {
+func globalsComplete() []pair {
+	var code strings.Builder
+	code.WriteString(prelude)
+	code.WriteString(engine.Stdlib)
+	code.WriteString("\n__autocomplete()\n")
+
+	vm := goja.New()
+	value, err := vm.RunString(code.String())
+	if err != nil {
+		return nil
+	}
+
+	if array, ok := value.Export().([]any); ok {
+		var reply []pair
+		for _, key := range array {
+			reply = append(reply, pair{
+				display: key.(string),
+				value:   key.(string),
+			})
+		}
+		return reply
+	}
+	return nil
+}
+
+func keysComplete(input []byte, args []string, compWord string) []pair {
 	args = args[2:] // Drop binary & file from the args.
 
 	if compWord == "" {
@@ -202,20 +214,24 @@ func codeComplete(input []byte, args []string, compWord string) {
 	vm := goja.New()
 	value, err := vm.RunString(code.String())
 	if err != nil {
-		return
+		return nil
 	}
 
 	if array, ok := value.Export().([]interface{}); ok {
 		prefix := dropTail(compWord)
-		var reply []string
+		var reply []pair
 		for _, key := range array {
-			reply = append(reply, join(prefix, key.(string)))
+			reply = append(reply, pair{
+				display: "." + key.(string),
+				value:   join(prefix, key.(string)),
+			})
 		}
-		compReply(filterReply(reply, compWord))
+		return reply
 	}
+	return nil
 }
 
-var alphaRe = regexp.MustCompile(`^\w+$`)
+var alphaRe = regexp.MustCompile(`^[\w$]+$`)
 
 func join(prefix, key string) string {
 	if alphaRe.MatchString(key) {
@@ -233,7 +249,7 @@ func filterArgs(args []string) []string {
 	for _, arg := range args {
 		found := false
 		for _, flag := range flags {
-			if arg == flag {
+			if arg == flag.value {
 				found = true
 				break
 			}
@@ -245,27 +261,75 @@ func filterArgs(args []string) []string {
 	return filtered
 }
 
-func fileComplete(compWord string) {
-	var matches []string
+func fileComplete(compWord string) []pair {
+	original := compWord
 
-	dir, filePrefix := filepath.Split(compWord)
-	if dir == "" {
-		dir = "."
+	// Step 1: Expand ~ to home directory
+	if strings.HasPrefix(compWord, "~") {
+		if compWord == "~" || strings.HasPrefix(compWord, "~/") {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				compWord = filepath.Join(home, compWord[1:])
+			}
+		} else {
+			// We don't support ~username completion
+			return nil
+		}
 	}
-	pattern := filepath.Join(dir, filePrefix+"*")
-	files, err := filepath.Glob(pattern)
+
+	// Step 2: If compWord ends in "/", treat it as a directory and add a "*" pattern
+	info, err := os.Stat(compWord)
+	if err == nil && info.IsDir() && !strings.HasSuffix(compWord, "*") {
+		compWord = filepath.Join(compWord, "*")
+	} else if !strings.HasSuffix(compWord, "*") {
+		// Add wildcard if not already present
+		compWord = compWord + "*"
+	}
+
+	// Step 3: Perform globbing
+	files, err := filepath.Glob(compWord)
 	if err != nil {
-		fmt.Println("Error reading directory:", err)
-		return
+		return nil
 	}
 
+	// Step 4: Format matches
+	var matches []pair
 	for _, match := range files {
-		relativePath, err := filepath.Rel(".", match)
-		if err != nil {
+		if match == "." || match == ".." {
 			continue
 		}
-		matches = append(matches, relativePath)
+
+		var suggestion string
+		if strings.HasPrefix(original, "~") {
+			home, _ := os.UserHomeDir()
+			if strings.HasPrefix(match, home) {
+				suggestion = "~" + strings.TrimPrefix(match, home)
+			} else {
+				suggestion = match
+			}
+		} else if filepath.IsAbs(original) {
+			suggestion = match
+		} else {
+			rel, err := filepath.Rel(".", match)
+			if err != nil {
+				continue
+			}
+			suggestion = rel
+		}
+
+		dirSuffix := ""
+		info, err := os.Stat(match)
+		if err == nil {
+			if info.IsDir() {
+				dirSuffix = "/"
+			}
+		}
+
+		matches = append(matches, pair{
+			display: filepath.Base(suggestion) + dirSuffix,
+			value:   suggestion,
+		})
 	}
 
-	compReply(matches)
+	return matches
 }
